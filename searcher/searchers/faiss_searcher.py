@@ -177,7 +177,7 @@ class FaissSearcher(BaseSearcher):
             lora_name_or_path=model_args.lora_name_or_path,
             cache_dir=model_args.cache_dir,
             torch_dtype=torch_dtype,
-            attn_implementation=model_args.attn_implementation,
+            attn_implementation="sdpa",
         )
 
         self.model = self.model.to("cuda" if torch.cuda.is_available() else "cpu")
@@ -249,11 +249,16 @@ class FaissSearcher(BaseSearcher):
             )
 
     def search(self, query: str, k: int = 10) -> List[Dict[str, Any]]:
+        return self.search_many([query], k=k)[0]
+
+    def search_many(self, queries: List[str], k: int = 10) -> List[List[Dict[str, Any]]]:
         if not all([self.retriever, self.model, self.tokenizer, self.lookup]):
             raise RuntimeError("Searcher not properly initialized")
+        if not queries:
+            return []
 
         batch_dict = self.tokenizer(
-            self.args.task_prefix + query,
+            [self.args.task_prefix + query for query in queries],
             padding=True,
             truncation=True,
             max_length=self.args.max_length,
@@ -270,16 +275,18 @@ class FaissSearcher(BaseSearcher):
 
         all_scores, psg_indices = self.retriever.search(q_reps, k)
 
-        results = []
-        for score, index in zip(all_scores[0], psg_indices[0]):
-            passage_id = self.lookup[index]
-            passage_text = self.docid_to_text.get(passage_id, "Text not found")
+        results_by_query = []
+        for scores, indices in zip(all_scores, psg_indices):
+            query_results = []
+            for score, index in zip(scores, indices):
+                passage_id = self.lookup[index]
+                passage_text = self.docid_to_text.get(passage_id, "Text not found")
+                query_results.append(
+                    {"docid": passage_id, "score": float(score), "text": passage_text}
+                )
+            results_by_query.append(query_results)
 
-            results.append(
-                {"docid": passage_id, "score": float(score), "text": passage_text}
-            )
-
-        return results
+        return results_by_query
 
     def get_document(self, docid: str) -> Optional[Dict[str, Any]]:
         if not self.docid_to_text:
@@ -335,27 +342,34 @@ class ReasonIrSearcher(FaissSearcher):
         logger.info("Model loaded successfully")
 
     def search(self, query: str, k: int = 10) -> List[Dict[str, Any]]:
+        return self.search_many([query], k=k)[0]
+
+    def search_many(self, queries: List[str], k: int = 10) -> List[List[Dict[str, Any]]]:
         if not all([self.retriever, self.model, self.lookup]):
             raise RuntimeError("Searcher not properly initialized")
+        if not queries:
+            return []
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         with torch.amp.autocast(device):
             with torch.no_grad():
                 q_reps = self.model.encode(
-                    [query],
+                    queries,
                     instruction="<|user|>\nGiven a question, retrieve relevant passages that help answer the question\n<|embed|>\n",
                 )
 
         all_scores, psg_indices = self.retriever.search(q_reps, k)
 
-        results = []
-        for score, index in zip(all_scores[0], psg_indices[0]):
-            passage_id = self.lookup[index]
-            passage_text = self.docid_to_text.get(passage_id, "Text not found")
+        results_by_query = []
+        for scores, indices in zip(all_scores, psg_indices):
+            query_results = []
+            for score, index in zip(scores, indices):
+                passage_id = self.lookup[index]
+                passage_text = self.docid_to_text.get(passage_id, "Text not found")
+                query_results.append(
+                    {"docid": passage_id, "score": float(score), "text": passage_text}
+                )
+            results_by_query.append(query_results)
 
-            results.append(
-                {"docid": passage_id, "score": float(score), "text": passage_text}
-            )
-
-        return results
+        return results_by_query
